@@ -9,9 +9,18 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@google-cloud/storage": "^7.17.3",
+    "@google-cloud/vision": "^5.3.4",
+    "date-fns": "^4.1.0",
+    "force-graph": "^1.51.0",
+    "idb-keyval": "^6.2.2",
     "next": "16.0.3",
     "react": "19.2.0",
-    "react-dom": "19.2.0"
+    "react-dom": "19.2.0",
+    "react-force-graph": "^1.48.1",
+    "react-force-graph-2d": "^1.29.0",
+    "xregexp": "^5.1.2",
+    "zustand": "^5.0.8"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

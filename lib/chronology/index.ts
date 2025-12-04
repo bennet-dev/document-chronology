@@ -1,2 +1,7 @@
-import { hasDate, getDates } from "./findDates";
-export { hasDate, getDates };
+import {
+  hasDate,
+  getDates,
+  getDatesWithContext,
+  selectDateOfService,
+} from "./findDates";
+export { hasDate, getDates, getDatesWithContext, selectDateOfService };

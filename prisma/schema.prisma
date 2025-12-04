@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Document {
+  id          String   @id @default(cuid())
+  filename    String
+  gcsPath     String   @unique
+  fileHash    String?  @unique  // SHA-256 for deduplication
+
+  uploadedAt  DateTime @default(now())
+  processedAt DateTime?
+
+  totalPages     Int?
+  pagesWithDates Int?
+
+  pages  Page[]
+  events DateEvent[]
+}
+
+model Page {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  pageNumber Int
+  text       String @db.Text
+
+  // Processing state
+  hasDate     Boolean @default(false)
+  llmAnalyzed Boolean @default(false)
+
+  // Duplicate detection
+  textHash            String?
+  simHash             String?
+  duplicateOfId       String?
+  duplicateOf         Page?   @relation("PageDuplicates", fields: [duplicateOfId], references: [id], onDelete: SetNull)
+  duplicates          Page[]  @relation("PageDuplicates")
+  duplicateConfidence Float?
+  isDuplicateReviewed Boolean @default(false)
+
+  events DateEvent[]
+
+  @@unique([documentId, pageNumber])
+  @@index([documentId])
+  @@index([textHash])
+  @@index([simHash])
+}
+
+model DateEvent {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  pageId     String?
+  page       Page?    @relation(fields: [pageId], references: [id], onDelete: SetNull)
+
+  // Date info
+  date        String  // ISO date
+  rawDateText String? // Original matched text
+
+  // LLM or user generated
+  summary     String
+  type        String  // visit, lab, imaging, procedure, medication, note, other
+  isPrimary   Boolean @default(false)
+  confidence  Float   @default(1.0)
+
+  // Source tracking
+  source   String  // "llm" or "user"
+  llmModel String? // e.g., "gemini-1.5-flash"
+
+  // User corrections
+  userEdited Boolean @default(false)
+  userNotes  String?
+
+  // Duplicate tracking
+  duplicateOfId String?
+  duplicateOf   DateEvent? @relation("EventDuplicates", fields: [duplicateOfId], references: [id], onDelete: SetNull)
+  duplicates    DateEvent[] @relation("EventDuplicates")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([documentId])
+  @@index([date])
+  @@index([pageId])
+}

@@ -1,4 +1,9 @@
 import XRegExp from "xregexp";
+import type {
+  ExtractedDate,
+  DateClassification,
+  PagePosition,
+} from "@/lib/types/chronology";
 
 /**
  * Returns true if `text` contains something that looks like a date.
@@ -190,6 +195,161 @@ function parseDate(dateStr: string): Date | null {
     const date = new Date(parseInt(year), parseInt(month) - 1, 1);
     if (!isNaN(date.getTime())) return date;
   }
-  
+
   return null;
+}
+
+// Heuristic patterns for classifying dates by context
+const DOS_PATTERNS = [
+  /date\s+of\s+service/i,
+  /\bdos\b[:\s]/i,
+  /visit\s+date/i,
+  /service\s+date/i,
+  /encounter\s+date/i,
+  /admission\s+date/i,
+  /procedure\s+date/i,
+  /exam\s+date/i,
+  /treatment\s+date/i,
+];
+
+const DOB_PATTERNS = [
+  /date\s+of\s+birth/i,
+  /\bdob\b[:\s]/i,
+  /birth\s*date/i,
+  /\bborn\b[:\s]/i,
+  /patient.*born/i,
+];
+
+const FAX_PATTERNS = [/\bfax\b/i, /transmitted/i, /\bsent\b[:\s]/i, /received/i];
+
+/**
+ * Classifies a date based on surrounding context.
+ */
+function classifyByContext(
+  before: string,
+  after: string
+): { classification: DateClassification; confidence: number } {
+  const context = before + " " + after;
+
+  // Check for Date of Service indicators (highest priority)
+  for (const pattern of DOS_PATTERNS) {
+    if (pattern.test(before)) {
+      return { classification: "date_of_service", confidence: 0.9 };
+    }
+  }
+
+  // Check for DOB indicators
+  for (const pattern of DOB_PATTERNS) {
+    if (pattern.test(before)) {
+      return { classification: "dob", confidence: 0.95 };
+    }
+  }
+
+  // Check for fax/transmission indicators
+  for (const pattern of FAX_PATTERNS) {
+    if (pattern.test(context)) {
+      return { classification: "fax", confidence: 0.8 };
+    }
+  }
+
+  // If DOS pattern appears after the date, still likely DOS
+  for (const pattern of DOS_PATTERNS) {
+    if (pattern.test(after)) {
+      return { classification: "date_of_service", confidence: 0.7 };
+    }
+  }
+
+  return { classification: "unknown", confidence: 0.0 };
+}
+
+/**
+ * Determines position on page based on character offset.
+ */
+function getPosition(offset: number, textLength: number): PagePosition {
+  const ratio = offset / textLength;
+  if (ratio < 0.2) return "top";
+  if (ratio > 0.8) return "bottom";
+  return "middle";
+}
+
+/**
+ * Extracts all dates from text with surrounding context and classification.
+ * This is the enhanced version used for medical records processing.
+ */
+export function getDatesWithContext(text: string): ExtractedDate[] {
+  if (!text) return [];
+
+  const results: ExtractedDate[] = [];
+  const globalRe = XRegExp(DATE_RE.source, "gi");
+
+  let match: RegExpExecArray | null;
+  while ((match = globalRe.exec(text)) !== null) {
+    const raw = match[0];
+    const offset = match.index;
+
+    // Extract context (50 chars before and after)
+    const beforeStart = Math.max(0, offset - 50);
+    const afterEnd = Math.min(text.length, offset + raw.length + 50);
+    const before = text.slice(beforeStart, offset).trim();
+    const after = text.slice(offset + raw.length, afterEnd).trim();
+
+    // Parse to ISO format
+    const parsed = parseDate(raw);
+    if (!parsed) continue;
+
+    const iso = parsed.toISOString().split("T")[0];
+    const position = getPosition(offset, text.length);
+    const { classification, confidence } = classifyByContext(before, after);
+
+    results.push({
+      raw,
+      iso,
+      context: { before, after },
+      position,
+      offset,
+      classification,
+      confidence,
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Determines the most likely date of service from extracted dates.
+ * Returns the date and whether it was confidently determined.
+ */
+export function selectDateOfService(
+  dates: ExtractedDate[]
+): { date: string; confident: boolean } | null {
+  if (dates.length === 0) return null;
+
+  // First, look for high-confidence DOS classification
+  const confidentDOS = dates.find(
+    (d) => d.classification === "date_of_service" && d.confidence >= 0.8
+  );
+  if (confidentDOS) {
+    return { date: confidentDOS.iso, confident: true };
+  }
+
+  // Filter out DOB and fax dates
+  const candidates = dates.filter(
+    (d) => d.classification !== "dob" && d.classification !== "fax"
+  );
+
+  if (candidates.length === 0) return null;
+
+  // Prefer dates at top of page (likely header dates)
+  const topDates = candidates.filter((d) => d.position === "top");
+  if (topDates.length === 1) {
+    return { date: topDates[0].iso, confident: false };
+  }
+
+  // If multiple candidates remain, we need LLM help
+  if (candidates.length === 1) {
+    return { date: candidates[0].iso, confident: false };
+  }
+
+  // Multiple ambiguous dates - return first but mark as not confident
+  return { date: candidates[0].iso, confident: false };
 }

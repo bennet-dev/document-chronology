@@ -46,10 +46,10 @@ export default function RootLayout({
                     Upload
                   </Link>
                   <Link
-                    href="/graph"
+                    href="/timeline"
                     className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-50 px-3 py-2 rounded-md text-sm font-medium transition-colors"
                   >
-                    Graph
+                    Timeline
                   </Link>
                 </div>
               </div>

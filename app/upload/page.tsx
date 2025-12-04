@@ -2,27 +2,39 @@
 
 import { useState, useCallback } from "react";
 import { useStore } from "@/lib/store";
+import { useRouter } from "next/navigation";
+import { ProcessingProgress } from "../timeline/components/ProcessingProgress";
+import type { ProcessResponse } from "../api/process/route";
+import type { UploadResponse } from "../api/upload/route";
 
 interface UploadStatus {
   status: "idle" | "uploading" | "success" | "error";
   message: string;
-  publicUrl?: string;
 }
 
 export default function UploadPage() {
+  const router = useRouter();
   const addUploadedDoc = useStore((state) => state.addUploadedDoc);
   const uploadedDocs = useStore((state) => state.uploadedDocs);
   const selectedDoc = useStore((state) => state.selectedDoc);
-  const ocrResults = useStore((state) => state.ocrResults);
-  const setOcrResults = useStore((state) => state.setOcrResults);
   const setSelectedDoc = useStore((state) => state.setSelectedDoc);
+  const setCurrentDocumentId = useStore((state) => state.setCurrentDocumentId);
+  const setPdfUrl = useStore((state) => state.setPdfUrl);
+  const processingStatus = useStore((state) => state.processingStatus);
+  const setProcessingStatus = useStore((state) => state.setProcessingStatus);
+  const setProcessingPhase = useStore((state) => state.setProcessingPhase);
+  const resetProcessing = useStore((state) => state.resetProcessing);
+
   const [dragActive, setDragActive] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<UploadStatus>({
     status: "idle",
     message: "",
   });
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [processing, setProcessing] = useState(false);
+
+  const isProcessing = !["idle", "done", "error"].includes(
+    processingStatus.phase
+  );
 
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -58,7 +70,6 @@ export default function UploadPage() {
     setUploadStatus({ status: "uploading", message: "Uploading file..." });
 
     try {
-      // Upload file through our API (avoids CORS issues)
       const formData = new FormData();
       formData.append("file", selectedFile);
 
@@ -71,15 +82,22 @@ export default function UploadPage() {
         throw new Error("Failed to upload file");
       }
 
-      const { filename, publicUrl } = await response.json();
+      const data: UploadResponse = await response.json();
 
-      addUploadedDoc(filename);
+      addUploadedDoc(data.filename);
+      setSelectedDoc(data.filename);
 
-      setUploadStatus({
-        status: "success",
-        message: "File uploaded successfully!",
-        publicUrl,
-      });
+      if (data.alreadyExists) {
+        setUploadStatus({
+          status: "success",
+          message: "Document already uploaded. Ready to process.",
+        });
+      } else {
+        setUploadStatus({
+          status: "success",
+          message: "File uploaded successfully!",
+        });
+      }
       setSelectedFile(null);
     } catch (error) {
       setUploadStatus({
@@ -89,15 +107,98 @@ export default function UploadPage() {
     }
   };
 
+  const processDocument = async () => {
+    if (!selectedDoc) return;
+
+    resetProcessing();
+
+    try {
+      // Phase 1: OCR + Date Extraction
+      setProcessingPhase("ocr", 10);
+      setProcessingStatus({ message: "Running OCR on PDF pages..." });
+
+      const processResponse = await fetch("/api/process", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: selectedDoc }),
+      });
+
+      if (!processResponse.ok) throw new Error("OCR processing failed");
+
+      const processData: ProcessResponse = await processResponse.json();
+      const documentId = processData.documentId;
+
+      // Store document ID in state
+      setCurrentDocumentId(documentId);
+      setPdfUrl(processData.pdfUrl);
+
+      if (processData.fromCache) {
+        setProcessingPhase("extracting", 40);
+        setProcessingStatus({
+          message: `Loaded ${processData.totalPages} pages from cache`,
+        });
+      } else {
+        setProcessingPhase("extracting", 40);
+        setProcessingStatus({
+          message: `Processed ${processData.totalPages} pages, ${processData.pagesWithDates.length} have dates`,
+        });
+      }
+
+      // Phase 2: LLM Classification for ALL pages with dates
+      if (processData.pagesWithDates.length > 0) {
+        setProcessingPhase("classifying", 50);
+        setProcessingStatus({
+          message: `Analyzing ${processData.pagesWithDates.length} pages with AI...`,
+        });
+
+        const pagesToClassify = processData.pages
+          .filter((p) => processData.pagesWithDates.includes(p.pageNumber))
+          .map((p) => ({
+            pageNumber: p.pageNumber,
+            text: p.text,
+            extractedDates: p.extractedDates,
+          }));
+
+        const classifyResponse = await fetch("/api/classify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ documentId, pages: pagesToClassify }),
+        });
+
+        if (classifyResponse.ok) {
+          const classifyData = await classifyResponse.json();
+          setProcessingStatus({
+            message: `Created ${classifyData.eventsCreated} events from AI analysis`,
+          });
+        }
+      }
+
+      setProcessingPhase("done", 100);
+      setProcessingStatus({ message: "Processing complete!" });
+
+      // Navigate to timeline after short delay
+      setTimeout(() => {
+        router.push("/timeline");
+      }, 1000);
+    } catch (error) {
+      console.error("Error processing document:", error);
+      setProcessingPhase("error", 0);
+      setProcessingStatus({
+        error:
+          error instanceof Error ? error.message : "Processing failed",
+      });
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-linear-to-br from-zinc-50 to-zinc-100 dark:from-zinc-900 dark:to-black p-8">
+    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-900 p-8">
       <div className="max-w-2xl mx-auto">
         <div className="bg-white dark:bg-zinc-800 rounded-2xl shadow-xl p-8">
           <h1 className="text-3xl font-bold text-zinc-900 dark:text-zinc-50 mb-2">
-            Upload Document
+            Upload Medical Records
           </h1>
           <p className="text-zinc-600 dark:text-zinc-400 mb-8">
-            Upload your files securely to cloud storage
+            Upload a PDF to extract dates and build a chronological timeline
           </p>
 
           {/* Drop Zone */}
@@ -116,6 +217,7 @@ export default function UploadPage() {
               type="file"
               id="file-upload"
               className="hidden"
+              accept=".pdf"
               onChange={handleFileSelect}
             />
 
@@ -148,7 +250,7 @@ export default function UploadPage() {
               ) : (
                 <div>
                   <p className="text-lg font-medium text-zinc-700 dark:text-zinc-300 mb-2">
-                    Drop your file here, or{" "}
+                    Drop your PDF here, or{" "}
                     <label
                       htmlFor="file-upload"
                       className="text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 cursor-pointer underline"
@@ -157,7 +259,7 @@ export default function UploadPage() {
                     </label>
                   </p>
                   <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                    Supports all file types
+                    PDF files only
                   </p>
                 </div>
               )}
@@ -189,109 +291,58 @@ export default function UploadPage() {
               }`}
             >
               <p className="font-medium">{uploadStatus.message}</p>
-              {uploadStatus.publicUrl && (
-                <a
-                  href={uploadStatus.publicUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm underline mt-2 block hover:opacity-75"
-                >
-                  View uploaded file
-                </a>
-              )}
             </div>
           )}
 
-          {/* Uploaded Documents Dropdown */}
+          {/* Document Selection & Processing */}
           {uploadedDocs.length > 0 && (
             <div className="mt-8">
               <label
                 htmlFor="doc-select"
                 className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2"
               >
-                Uploaded Documents
+                Select Document to Process
               </label>
               <select
                 id="doc-select"
                 value={selectedDoc || ""}
                 onChange={(e) => setSelectedDoc(e.target.value || null)}
-                className="w-full px-4 py-2 border border-zinc-300 dark:border-zinc-600 rounded-lg bg-white dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                disabled={isProcessing}
+                className="w-full px-4 py-2 border border-zinc-300 dark:border-zinc-600 rounded-lg bg-white dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
               >
-                <option value={""}>Select a document</option>
+                <option value="">Select a document</option>
                 {uploadedDocs.map((doc) => (
                   <option key={doc} value={doc}>
                     {doc}
                   </option>
                 ))}
               </select>
-              {selectedDoc && (
+
+              {selectedDoc && !isProcessing && (
                 <button
-                  onClick={async () => {
-                    setProcessing(true);
-                    setOcrResults(null);
-                    try {
-                      const response = await fetch("/api/process", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ filename: selectedDoc }),
-                      });
-                      if (!response.ok) throw new Error("Processing failed");
-                      const data = await response.json();
-                      console.log("OCR Results:", Object.keys(data));
-                      setOcrResults(data);
-                      console.log("PAGES: ", data.pages);
-                    } catch (error) {
-                      console.error("Error processing document:", error);
-                      setOcrResults(null);
-                    } finally {
-                      setProcessing(false);
-                    }
-                  }}
-                  disabled={processing}
-                  className="w-full mt-4 bg-green-600 hover:bg-green-700 disabled:bg-zinc-400 text-white font-semibold py-3 px-6 rounded-lg transition-colors disabled:cursor-not-allowed"
+                  onClick={processDocument}
+                  className="w-full mt-4 bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
                 >
-                  {processing ? "Processing..." : "Begin Processing"}
+                  Build Timeline
                 </button>
-              )}
-              {processing && (
-                <div className="mt-4 text-center text-sm text-zinc-600 dark:text-zinc-400">
-                  This can take several minutes....
-                </div>
               )}
             </div>
           )}
 
-          {/* OCR Results */}
-          {ocrResults && (
-            <div className="mt-8 space-y-6">
-              <div>
-                <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50 mb-2">
-                  Extracted Text
-                </h3>
-                <div className="max-h-96 overflow-y-auto border border-zinc-300 dark:border-zinc-600 rounded-lg p-4 bg-zinc-50 dark:bg-zinc-900">
-                  <pre className="text-sm text-zinc-800 dark:text-zinc-200 whitespace-pre-wrap font-mono">
-                    {ocrResults?.text}
-                  </pre>
-                </div>
-              </div>
-
-              <div>
-                <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50 mb-2">
-                  Full OCR Response (JSON)
-                </h3>
-                <div className="max-h-96 overflow-y-auto border border-zinc-300 dark:border-zinc-600 rounded-lg p-4 bg-zinc-50 dark:bg-zinc-900">
-                  <pre className="text-xs text-zinc-800 dark:text-zinc-200 whitespace-pre-wrap font-mono">
-                    {JSON.stringify(ocrResults, null, 2)}
-                  </pre>
-                </div>
-              </div>
+          {/* Processing Progress */}
+          {(isProcessing || processingStatus.phase === "error") && (
+            <div className="mt-8">
+              <ProcessingProgress status={processingStatus} />
             </div>
           )}
         </div>
 
         {/* Info Section */}
         <div className="mt-6 text-center text-sm text-zinc-600 dark:text-zinc-400">
-          <p>Files are uploaded securely using pre-signed URLs</p>
+          <p>
+            Medical records are processed using OCR and AI to extract dates of
+            service
+          </p>
         </div>
       </div>
     </div>
